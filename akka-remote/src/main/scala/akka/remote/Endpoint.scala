@@ -409,8 +409,26 @@ private[remote] class EndpointWriter(
   val extendedSystem: ExtendedActorSystem = context.system.asInstanceOf[ExtendedActorSystem]
   val remoteMetrics = RemoteMetricsExtension(extendedSystem)
 
+  var _serializationInfoDoNotCallDirectly: Serialization.Information = _
+  var _handleDoNotCallDirectly: Option[AkkaProtocolHandle] = None // FIXME: refactor into state data
+  def handle: Option[AkkaProtocolHandle] = _handleDoNotCallDirectly
+  def handle_=(newHandle: Option[AkkaProtocolHandle]): Unit = newHandle match {
+    case h if h == _handleDoNotCallDirectly ⇒ // Noop
+    case h @ Some(nh) ⇒
+      _serializationInfoDoNotCallDirectly = Serialization.Information(nh.localAddress, extendedSystem)
+      _handleDoNotCallDirectly = h
+    case None ⇒
+      _serializationInfoDoNotCallDirectly = null
+      _handleDoNotCallDirectly = None
+  }
+
+  def serializationInformation: Serialization.Information = _serializationInfoDoNotCallDirectly match {
+    case null ⇒ throw new EndpointException("Internal error: No Serialization.Information present when needed")
+    case some ⇒ some
+  }
+
+  handle = handleOrActive
   var reader: Option[ActorRef] = None
-  var handle: Option[AkkaProtocolHandle] = handleOrActive // FIXME: refactor into state data
   val readerId = Iterator from 0
 
   def newAckDeadline: Deadline = Deadline.now + settings.SysMsgAckTimeout
@@ -612,14 +630,10 @@ private[remote] class EndpointWriter(
     Some(newReader)
   }
 
-  private def serializeMessage(msg: Any): SerializedMessage = handle match {
-    case Some(h) ⇒
-      Serialization.currentTransportInformation.withValue(Serialization.Information(h.localAddress, extendedSystem)) {
-        (MessageSerializer.serialize(extendedSystem, msg.asInstanceOf[AnyRef]))
-      }
-    case None ⇒
-      throw new EndpointException("Internal error: No handle was present during serialization of outbound message.")
-  }
+  private def serializeMessage(msg: Any): SerializedMessage =
+    Serialization.currentTransportInformation.withValue(serializationInformation) {
+      MessageSerializer.serialize(extendedSystem, msg.asInstanceOf[AnyRef])
+    }
 
 }
 
