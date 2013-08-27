@@ -214,7 +214,8 @@ object MemberStatus {
 @SerialVersionUID(1L)
 private[cluster] case class UniqueAddress(address: Address, uid: Int) extends Ordered[UniqueAddress] {
   @transient
-  override lazy val hashCode = scala.util.hashing.MurmurHash3.productHash(this)
+  override lazy val hashCode = uid
+  // FIXME #2307 is the uid hash good enough, or do we have to use scala.util.hashing.MurmurHash3.productHash(this)
 
   override def compare(that: UniqueAddress): Int = {
     val result = Member.addressOrdering.compare(this.address, that.address)

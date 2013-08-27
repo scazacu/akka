@@ -44,6 +44,7 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
     classOf[InternalClusterAction.InitJoinNack] -> (bytes ⇒ InternalClusterAction.InitJoinNack(addressFromBinary(bytes))),
     classOf[ClusterHeartbeatReceiver.Heartbeat] -> (bytes ⇒ ClusterHeartbeatReceiver.Heartbeat(addressFromBinary(bytes))),
     classOf[ClusterHeartbeatReceiver.EndHeartbeat] -> (bytes ⇒ ClusterHeartbeatReceiver.EndHeartbeat(addressFromBinary(bytes))),
+    classOf[ClusterHeartbeatReceiver.EndHeartbeatAck] -> (bytes ⇒ ClusterHeartbeatReceiver.EndHeartbeatAck(addressFromBinary(bytes))),
     classOf[ClusterHeartbeatSender.HeartbeatRequest] -> (bytes ⇒ ClusterHeartbeatSender.HeartbeatRequest(addressFromBinary(bytes))),
     classOf[GossipStatus] -> gossipStatusFromBinary,
     classOf[GossipEnvelope] -> gossipEnvelopeFromBinary,
@@ -67,6 +68,7 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
       case InternalClusterAction.InitJoinAck(address) ⇒ addressToProto(address).toByteArray
       case InternalClusterAction.InitJoinNack(address) ⇒ addressToProto(address).toByteArray
       case ClusterHeartbeatReceiver.EndHeartbeat(from) ⇒ addressToProto(from).toByteArray
+      case ClusterHeartbeatReceiver.EndHeartbeatAck(from) ⇒ addressToProto(from).toByteArray
       case ClusterHeartbeatSender.HeartbeatRequest(from) ⇒ addressToProto(from).toByteArray
       case _ ⇒ throw new IllegalArgumentException(s"Can't serialize object of type ${obj.getClass}")
     }
@@ -132,6 +134,13 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
 
   private val memberStatusFromInt = memberStatusToInt.map { case (a, b) ⇒ (b, a) }
 
+  private val reachabilityStatusToInt = scala.collection.immutable.HashMap[Reachability.ReachabilityStatus, Int](
+    Reachability.Reachable -> msg.ReachabilityStatus.Reachable_VALUE,
+    Reachability.Unreachable -> msg.ReachabilityStatus.Unreachable_VALUE,
+    Reachability.Terminated -> msg.ReachabilityStatus.Terminated_VALUE)
+
+  private val reachabilityStatusFromInt = reachabilityStatusToInt.map { case (a, b) ⇒ (b, a) }
+
   private def mapWithErrorMessage[T](map: Map[T, Int], value: T, unknown: String): Int = map.get(value) match {
     case Some(x) ⇒ x
     case _       ⇒ throw new IllegalArgumentException(s"Unknown ${unknown} [${value}] in cluster message")
@@ -139,8 +148,8 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
 
   private def gossipToProto(gossip: Gossip): msg.Gossip = {
     import scala.collection.breakOut
-    val allMembers = (gossip.members.iterator ++ gossip.overview.unreachable.iterator).toIndexedSeq
-    val allAddresses: Vector[UniqueAddress] = allMembers.map(_.uniqueAddress)(breakOut)
+    val allMembers = gossip.members.toVector
+    val allAddresses: Vector[UniqueAddress] = allMembers.map(_.uniqueAddress)
     val addressMapping = allAddresses.zipWithIndex.toMap
     val allRoles = allMembers.foldLeft(Set.empty[String])((acc, m) ⇒ acc ++ m.roles).to[Vector]
     val roleMapping = allRoles.zipWithIndex.toMap
@@ -160,11 +169,17 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
       msg.GossipOverview.Seen(mapUniqueAddress(address), vectorClockToProto(version, hashMapping))
     }
 
-    val unreachable: Vector[msg.Member] = gossip.overview.unreachable.map(memberToProto)(breakOut)
+    def reachabilityToProto(reachability: Reachability): Vector[msg.Reachability] = {
+      reachability.allRecords.map(r ⇒
+        msg.Reachability(mapUniqueAddress(r.observer), mapUniqueAddress(r.subject),
+          msg.ReachabilityStatus.valueOf(reachabilityStatusToInt(r.status)), r.version))(breakOut)
+    }
+
+    val reachability = reachabilityToProto(gossip.overview.reachability)
     val members: Vector[msg.Member] = gossip.members.map(memberToProto)(breakOut)
     val seen: Vector[msg.GossipOverview.Seen] = gossip.overview.seen.map(seenToProto)(breakOut)
 
-    val overview = msg.GossipOverview(seen, unreachable)
+    val overview = msg.GossipOverview(seen, reachability)
 
     msg.Gossip(allAddresses.map(uniqueAddressToProto),
       allRoles, allHashes, members, overview, vectorClockToProto(gossip.version, hashMapping))
@@ -198,6 +213,15 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
     val roleMapping = gossip.allRoles
     val hashMapping = gossip.allHashes
 
+    def reachabilityFromProto(reachability: immutable.Seq[msg.Reachability]): Reachability = {
+      val records = reachability.map { row ⇒
+        val observer = addressMapping(row.observerAddressIndex)
+        val subject = addressMapping(row.subjectAddressIndex)
+        Reachability.Record(observer, subject, reachabilityStatusFromInt(row.status), row.version)
+      }
+      Reachability(records)
+    }
+
     def memberFromProto(member: msg.Member) =
       new Member(addressMapping(member.addressIndex), member.upNumber, memberStatusFromInt(member.status.id),
         member.rolesIndexes.map(roleMapping)(breakOut))
@@ -206,9 +230,10 @@ class ClusterMessageSerializer(val system: ExtendedActorSystem) extends Serializ
       (addressMapping(seen.addressIndex), vectorClockFromProto(seen.version, hashMapping))
 
     val members: immutable.SortedSet[Member] = gossip.members.map(memberFromProto)(breakOut)
-    val unreachable: immutable.Set[Member] = gossip.overview.unreachable.map(memberFromProto)(breakOut)
+
+    val reachability = reachabilityFromProto(gossip.overview.reachability)
     val seen: immutable.TreeMap[UniqueAddress, VectorClock] = gossip.overview.seen.map(seenFromProto)(breakOut)
-    val overview = GossipOverview(seen, unreachable)
+    val overview = GossipOverview(seen, reachability)
 
     Gossip(members, overview, vectorClockFromProto(gossip.version, hashMapping))
   }
