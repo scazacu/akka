@@ -12,10 +12,6 @@ import akka.actor.Address
  * INTERNAL API
  */
 private[cluster] object Reachability {
-  private val emptyObserverRows: Map[UniqueAddress, Record] =
-    Map.empty.withDefault(subject ⇒ Record(null, subject, Reachable, 0))
-  private val emptyTable: Map[UniqueAddress, Map[UniqueAddress, Record]] =
-    Map.empty.withDefaultValue(emptyObserverRows)
   val empty = new Reachability(Vector.empty, None, None)
 
   def apply(records: immutable.IndexedSeq[Record]): Reachability = new Reachability(records, None, None)
@@ -25,12 +21,13 @@ private[cluster] object Reachability {
     case _                               ⇒ apply(records.toVector)
   }
 
+  @SerialVersionUID(1L)
   case class Record(observer: UniqueAddress, subject: UniqueAddress, status: ReachabilityStatus, version: Long)
 
   sealed trait ReachabilityStatus
-  case object Reachable extends ReachabilityStatus
-  case object Unreachable extends ReachabilityStatus
-  case object Terminated extends ReachabilityStatus
+  @SerialVersionUID(1L) case object Reachable extends ReachabilityStatus
+  @SerialVersionUID(1L) case object Unreachable extends ReachabilityStatus
+  @SerialVersionUID(1L) case object Terminated extends ReachabilityStatus
 
 }
 
@@ -49,6 +46,7 @@ private[cluster] object Reachability {
  * - Unreachable if any observer node considers it as Unreachable
  * - Reachable otherwise, i.e. no observer node considers it as Unreachable
  */
+@SerialVersionUID(1L)
 private[cluster] class Reachability private (
   private val records: immutable.IndexedSeq[Reachability.Record],
   precomputedTable: Option[Map[UniqueAddress, Map[UniqueAddress, Reachability.Record]]],
@@ -61,12 +59,12 @@ private[cluster] class Reachability private (
     precomputedTable match {
       case Some(x) ⇒ x
       case None ⇒
-        (records.groupBy(_.observer).map {
+        records.groupBy(_.observer).map {
           case (observer, observerRows) ⇒
             val observerMap: Map[UniqueAddress, Record] =
               (observerRows.map { row ⇒ (row.subject -> row) })(breakOut)
-            (observer -> observerMap.withDefault(subject ⇒ Record(observer, subject, Reachable, 0)))
-        }).withDefaultValue(emptyObserverRows)
+            (observer -> observerMap)
+        }
     }
 
   @transient private lazy val aggregatedStatus: Map[UniqueAddress, Reachability.ReachabilityStatus] = precomputedAggregatedStatus match {
@@ -75,12 +73,17 @@ private[cluster] class Reachability private (
       records.map(_.subject).map(subject ⇒ subject -> aggregateStatus(subject, records.iterator))(breakOut)
   }
 
-  @tailrec private def aggregateStatus(subject: UniqueAddress, records: Iterator[Record]): ReachabilityStatus = {
+  @tailrec private def aggregateStatus(subject: UniqueAddress, records: Iterator[Record],
+                                       foundUnreachable: Boolean = false): ReachabilityStatus = {
     if (records.hasNext) {
       val r = records.next()
-      if ((r.status == Unreachable || r.status == Terminated) && r.subject == subject) r.status
-      else aggregateStatus(subject, records)
-    } else Reachable
+      if (r.subject != subject) aggregateStatus(subject, records, foundUnreachable)
+      else if (r.status == Terminated) r.status
+      else if (r.status == Unreachable) aggregateStatus(subject, records, true)
+      else aggregateStatus(subject, records, foundUnreachable)
+    } else {
+      if (foundUnreachable) Unreachable else Reachable
+    }
   }
 
   def unreachable(observer: UniqueAddress, subject: UniqueAddress): Reachability =
@@ -93,23 +96,42 @@ private[cluster] class Reachability private (
     change(observer, subject, Terminated)
 
   private def change(observer: UniqueAddress, subject: UniqueAddress, status: ReachabilityStatus): Reachability = {
-    val oldObserverRows = table(observer)
-    val oldRecord = oldObserverRows(subject)
-    if (oldRecord.status == Terminated || oldRecord.status == status)
-      this
-    else {
-      val newRecord = Record(observer, subject, status, oldRecord.version + 1)
-      val newRecords = records.indexOf(oldRecord) match {
-        case -1 ⇒ records :+ newRecord
-        case i  ⇒ records.updated(i, newRecord)
-      }
-      val newObserverRows = oldObserverRows.updated(subject, newRecord)
-      val newTable = table.updated(observer, newObserverRows)
+    table.get(observer) match {
+      case None ⇒
+        val newRecord = Record(observer, subject, status, 1)
+        val newRecords = records :+ newRecord
+        val newTable = table.updated(observer, Map(subject -> newRecord))
+        val newAggregatedStatus = aggregatedStatus.updated(subject,
+          aggregateStatus(subject, newRecords.iterator))
+        new Reachability(newRecords, Some(newTable), Some(newAggregatedStatus))
 
-      val newStatus = aggregateStatus(subject, newTable.values.flatMap(_.values).iterator)
-      val newAggregatedStatus = aggregatedStatus.updated(subject, newStatus)
+      case Some(oldObserverRows) ⇒
 
-      new Reachability(newRecords, Some(newTable), Some(newAggregatedStatus))
+        def updatedTable(newRecord: Record) = {
+          val newObserverRows = oldObserverRows.updated(newRecord.subject, newRecord)
+          table.updated(newRecord.observer, newObserverRows)
+        }
+
+        oldObserverRows.get(subject) match {
+          case None ⇒
+            val newRecord = Record(observer, subject, status, 1)
+            val newRecords = records :+ newRecord
+            val newTable = updatedTable(newRecord)
+            val newAggregatedStatus = aggregatedStatus.updated(subject,
+              aggregateStatus(subject, newRecords.iterator))
+            new Reachability(newRecords, Some(newTable), Some(newAggregatedStatus))
+          case Some(oldRecord) ⇒
+            if (oldRecord.status == Terminated || oldRecord.status == status)
+              this
+            else {
+              val newRecord = Record(observer, subject, status, oldRecord.version + 1)
+              val newRecords = records.updated(records.indexOf(oldRecord), newRecord)
+              val newTable = updatedTable(newRecord)
+              val newAggregatedStatus = aggregatedStatus.updated(subject,
+                aggregateStatus(subject, newRecords.iterator))
+              new Reachability(newRecords, Some(newTable), Some(newAggregatedStatus))
+            }
+        }
     }
   }
 
@@ -159,7 +181,16 @@ private[cluster] class Reachability private (
   }
 
   def status(observer: UniqueAddress, subject: UniqueAddress): ReachabilityStatus =
-    table(observer)(subject).status
+    table.get(observer) match {
+      case None ⇒ Reachable
+      case Some(observerRows) ⇒ observerRows.get(subject) match {
+        case None         ⇒ Reachable
+        case Some(record) ⇒ record.status
+      }
+    }
+
+  def status(node: UniqueAddress): ReachabilityStatus =
+    aggregatedStatus.getOrElse(node, Reachable)
 
   def isReachable(node: UniqueAddress): Boolean =
     aggregatedStatus.get(node) match {
@@ -188,12 +219,15 @@ private[cluster] class Reachability private (
   /**
    * Doesn't include terminated
    */
-  def allUnreachableFrom(observer: UniqueAddress): Set[UniqueAddress] = {
-    val result: immutable.HashSet[UniqueAddress] = table(observer).collect {
-      case (subject, record) if record.status == Unreachable ⇒ subject
-    }(breakOut)
-    result
-  }
+  def allUnreachableFrom(observer: UniqueAddress): Set[UniqueAddress] =
+    table.get(observer) match {
+      case None ⇒ Set.empty
+      case Some(observerRows) ⇒
+        val result: immutable.HashSet[UniqueAddress] = observerRows.collect {
+          case (subject, record) if record.status == Unreachable ⇒ subject
+        }(breakOut)
+        result
+    }
 
   def observersGroupedByUnreachable: Map[UniqueAddress, Set[UniqueAddress]] = {
     allRecords.groupBy(_.subject).collect {
@@ -204,11 +238,11 @@ private[cluster] class Reachability private (
     }
   }
 
-  def allObservers: Set[UniqueAddress] = table.keys.toSet
+  def allObservers: Set[UniqueAddress] = table.keySet
 
-  def allSubjects: Set[UniqueAddress] = aggregatedStatus.keys.toSet
+  def allSubjects: Set[UniqueAddress] = aggregatedStatus.keySet
 
-  def allRecords: immutable.IndexedSeq[Record] = table.values.flatMap(_.values)(breakOut)
+  def allRecords: immutable.IndexedSeq[Record] = records
 
   override def hashCode: Int = table.hashCode
 

@@ -11,6 +11,8 @@ import akka.actor.Address
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class ReachabilitySpec extends WordSpec with MustMatchers {
 
+  import Reachability.{ Reachable, Unreachable, Terminated, Record }
+
   val nodeA = UniqueAddress(Address("akka.tcp", "sys", "a", 2552), 1)
   val nodeB = UniqueAddress(Address("akka.tcp", "sys", "b", 2552), 2)
   val nodeC = UniqueAddress(Address("akka.tcp", "sys", "c", 2552), 3)
@@ -61,6 +63,18 @@ class ReachabilitySpec extends WordSpec with MustMatchers {
       r.isReachable(nodeA) must be(true)
     }
 
+    "have correct aggregated status" in {
+      val records = Vector(
+        Reachability.Record(nodeA, nodeB, Reachable, 2),
+        Reachability.Record(nodeC, nodeB, Unreachable, 2),
+        Reachability.Record(nodeA, nodeD, Unreachable, 2),
+        Reachability.Record(nodeC, nodeB, Terminated, 2))
+      val r = Reachability(records)
+      r.status(nodeA) must be(Reachable)
+      r.status(nodeB) must be(Terminated)
+      r.status(nodeD) must be(Unreachable)
+    }
+
     "have correct status for a mix of nodes" in {
       val r = Reachability.empty.
         unreachable(nodeB, nodeA).unreachable(nodeC, nodeA).unreachable(nodeD, nodeA).
@@ -69,15 +83,15 @@ class ReachabilitySpec extends WordSpec with MustMatchers {
         reachable(nodeE, nodeD).
         unreachable(nodeA, nodeE).terminated(nodeB, nodeE)
 
-      r.status(nodeB, nodeA) must be(Reachability.Unreachable)
-      r.status(nodeC, nodeA) must be(Reachability.Unreachable)
-      r.status(nodeD, nodeA) must be(Reachability.Unreachable)
+      r.status(nodeB, nodeA) must be(Unreachable)
+      r.status(nodeC, nodeA) must be(Unreachable)
+      r.status(nodeD, nodeA) must be(Unreachable)
 
-      r.status(nodeC, nodeB) must be(Reachability.Reachable)
-      r.status(nodeD, nodeB) must be(Reachability.Unreachable)
+      r.status(nodeC, nodeB) must be(Reachable)
+      r.status(nodeD, nodeB) must be(Unreachable)
 
-      r.status(nodeA, nodeE) must be(Reachability.Unreachable)
-      r.status(nodeB, nodeE) must be(Reachability.Terminated)
+      r.status(nodeA, nodeE) must be(Unreachable)
+      r.status(nodeB, nodeE) must be(Terminated)
 
       r.isReachable(nodeA) must be(false)
       r.isReachable(nodeB) must be(false)
@@ -115,11 +129,11 @@ class ReachabilitySpec extends WordSpec with MustMatchers {
       val r2 = r1.reachable(nodeB, nodeA).unreachable(nodeD, nodeE).unreachable(nodeC, nodeA)
       val merged = r1.merge(Set(nodeA, nodeB, nodeC, nodeD, nodeE), r2)
 
-      merged.status(nodeB, nodeA) must be(Reachability.Reachable)
-      merged.status(nodeC, nodeA) must be(Reachability.Unreachable)
-      merged.status(nodeC, nodeD) must be(Reachability.Unreachable)
-      merged.status(nodeD, nodeE) must be(Reachability.Unreachable)
-      merged.status(nodeE, nodeA) must be(Reachability.Reachable)
+      merged.status(nodeB, nodeA) must be(Reachable)
+      merged.status(nodeC, nodeA) must be(Unreachable)
+      merged.status(nodeC, nodeD) must be(Unreachable)
+      merged.status(nodeD, nodeE) must be(Unreachable)
+      merged.status(nodeE, nodeA) must be(Reachable)
 
       merged.isReachable(nodeA) must be(false)
       merged.isReachable(nodeD) must be(false)
@@ -134,10 +148,10 @@ class ReachabilitySpec extends WordSpec with MustMatchers {
         unreachable(nodeB, nodeE).
         remove(Set(nodeA, nodeB))
 
-      r.status(nodeB, nodeA) must be(Reachability.Reachable)
-      r.status(nodeC, nodeD) must be(Reachability.Unreachable)
-      r.status(nodeB, nodeC) must be(Reachability.Reachable)
-      r.status(nodeB, nodeE) must be(Reachability.Reachable)
+      r.status(nodeB, nodeA) must be(Reachable)
+      r.status(nodeC, nodeD) must be(Unreachable)
+      r.status(nodeB, nodeC) must be(Reachable)
+      r.status(nodeB, nodeE) must be(Reachable)
     }
 
   }

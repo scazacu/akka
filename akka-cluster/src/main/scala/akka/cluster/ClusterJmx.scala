@@ -134,7 +134,7 @@ private[akka] class ClusterJmx(cluster: Cluster, log: LoggingAdapter) {
       // JMX attributes (bean-style)
 
       def getClusterStatus: String = {
-        val members = clusterView.members.map { m ⇒
+        val members = clusterView.members.toSeq.sorted(Member.ordering).map { m ⇒
           s"""{
               |      "address": "${m.address}",
               |      "status": "${m.status}"
