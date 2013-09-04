@@ -112,6 +112,7 @@ abstract class MBeanSpec
 
       runOn(first) {
         val sortedNodes = Vector(first, second, third, fourth).sorted.map(address(_))
+        val unreachableObservedBy = Vector(first, second, third).sorted.map(address(_))
         val expectedJson =
           s"""{
              |  "self-address": "${address(first)}",
@@ -137,9 +138,9 @@ abstract class MBeanSpec
              |    {
              |      "node": "${address(fourth)}",
              |      "observed-by": [
-             |        "${sortedNodes(0)}",
-             |        "${sortedNodes(1)}",
-             |        "${sortedNodes(2)}"
+             |        "${unreachableObservedBy(0)}",
+             |        "${unreachableObservedBy(1)}",
+             |        "${unreachableObservedBy(2)}"
              |      ]
              |    }
              |  ]

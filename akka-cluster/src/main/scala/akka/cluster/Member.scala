@@ -217,7 +217,7 @@ private[cluster] case class UniqueAddress(address: Address, uid: Int) extends Or
   override lazy val hashCode = uid
   // FIXME #2307 is the uid hash good enough, or do we have to use scala.util.hashing.MurmurHash3.productHash(this)
 
-  override def compare(that: UniqueAddress): Int = {
+  def compare(that: UniqueAddress): Int = {
     val result = Member.addressOrdering.compare(this.address, that.address)
     if (result == 0) if (this.uid < that.uid) -1 else if (this.uid == that.uid) 0 else 1
     else result

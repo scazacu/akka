@@ -187,8 +187,7 @@ private[cluster] case class Gossip(
     // When that is done we check that all members with a convergence
     // status is in the seen table and has the latest vector clock
     // version
-    // FIXME #2307 Reachability.Terminated?
-    val unreachable = overview.reachability.allUnreachable map member
+    val unreachable = overview.reachability.allUnreachableOrTerminated map member
     unreachable.forall(m ⇒ Gossip.convergenceSkipUnreachableWithMemberStatus(m.status)) &&
       !members.exists(m ⇒ Gossip.convergenceMemberStatus(m.status) && !seenByNode(m.uniqueAddress))
   }

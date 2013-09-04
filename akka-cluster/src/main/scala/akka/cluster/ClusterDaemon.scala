@@ -14,6 +14,7 @@ import akka.actor.SupervisorStrategy.Stop
 import akka.cluster.MemberStatus._
 import akka.cluster.ClusterEvent._
 import akka.dispatch.{ UnboundedMessageQueueSemantics, RequiresMessageQueue }
+import akka.remote.QuarantinedEvent
 
 /**
  * Base trait for all cluster messages. All ClusterMessage's are serializable.
@@ -263,13 +264,16 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
       Some(scheduler.schedule(PeriodicTasksInitialDelay.max(d), d, self, PublishStatsTick))
   }
 
-  override def preStart(): Unit =
+  override def preStart(): Unit = {
+    context.system.eventStream.subscribe(self, classOf[QuarantinedEvent])
     if (SeedNodes.isEmpty)
       logInfo("No seed-nodes configured, manual cluster join required")
     else
       self ! JoinSeedNodes(SeedNodes)
+  }
 
   override def postStop(): Unit = {
+    context.system.eventStream.unsubscribe(self)
     gossipTask.cancel()
     failureDetectorReaperTask.cancel()
     leaderActionsTask.cancel()
@@ -322,6 +326,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     case ClusterUserAction.Leave(address) ⇒ leaving(address)
     case SendGossipTo(address)            ⇒ sendGossipTo(address)
     case msg: SubscriptionMessage         ⇒ publisher forward msg
+    case QuarantinedEvent(address, uid)   ⇒ quarantined(UniqueAddress(address, uid))
     case ClusterUserAction.JoinTo(address) ⇒
       logInfo("Trying to join [{}] when already part of a cluster, ignoring", address)
     case JoinSeedNodes(seedNodes) ⇒
@@ -511,6 +516,8 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
           logInfo("Marking node [{}] as [{}]", m.address, Down)
         else
           logInfo("Marking unreachable node [{}] as [{}]", m.address, Down)
+
+        // replace member (changed status)
         val newMembers = localMembers - m + m
         // FIXME #2307 why do we need removal from seen here?
         // remove nodes marked as DOWN from the `seen` table
@@ -518,7 +525,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
 
         // update gossip overview
         val newOverview = localOverview copy (seen = newSeen)
-        val newGossip = localGossip copy (overview = newOverview, members = newMembers) // update gossip
+        val newGossip = localGossip copy (members = newMembers, overview = newOverview) // update gossip
         updateLatestGossip(newGossip)
 
         publish(latestGossip)
@@ -526,6 +533,20 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
         logInfo("Ignoring down of unknown node [{}] as [{}]", address)
     }
 
+  }
+
+  def quarantined(node: UniqueAddress): Unit = {
+    val localGossip = latestGossip
+    if (localGossip.hasMember(node)) {
+      val newReachability = latestGossip.overview.reachability.terminated(selfUniqueAddress, node)
+      val newOverview = localGossip.overview copy (reachability = newReachability)
+      val newGossip = localGossip copy (overview = newOverview)
+      updateLatestGossip(newGossip)
+      log.error("Cluster Node [{}] - Marking node as TERMINATED [{}], due to quarantine",
+        selfAddress, node.address)
+      publish(latestGossip)
+      downing(node.address)
+    }
   }
 
   // FIXME #2307 don't we have to propagate change of seen table, even if same version?
@@ -724,7 +745,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     def isJoiningToUp(m: Member): Boolean = m.status == Joining && enoughMembers
 
     val removedUnreachable = for {
-      node ← localOverview.reachability.allUnreachable // FIXME #2307 Reachability.Terminated
+      node ← localOverview.reachability.allUnreachableOrTerminated
       m = localGossip.member(node)
       if Gossip.removeUnreachableWithMemberStatus(m.status)
     } yield m
@@ -757,7 +778,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
       // handle changes
 
       // replace changed members
-      val newMembers = localMembers -- changedMembers ++ changedMembers -- removedUnreachable
+      val newMembers = changedMembers ++ localMembers -- removedUnreachable
 
       // removing REMOVED nodes from the `seen` table
       val removed = removedUnreachable.map(_.uniqueAddress)
@@ -808,10 +829,8 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     val localOverview = localGossip.overview
     val localSeen = localOverview.seen
 
-    // FIXME #2307 we should have a timeout based auto-down
-
     val changedUnreachableMembers = for {
-      node ← localOverview.reachability.allUnreachable // FIXME #2307 Reachability.Terminated
+      node ← localOverview.reachability.allUnreachableOrTerminated
       m = localGossip.member(node)
       if m.status != Removed && !Gossip.convergenceSkipUnreachableWithMemberStatus(m.status)
     } yield m.copy(status = Down)
@@ -925,7 +944,7 @@ private[cluster] class ClusterCoreDaemon(publisher: ActorRef) extends Actor with
     if (validNodeForGossip(node))
       clusterCore(node.address) ! GossipStatus(selfUniqueAddress, latestGossip.version)
 
-  // // FIXME #2307 is aggregated reachability check too strict, should we only look for reachability from this node, but in that case the ignore check in receiveGossip should also be changed
+  // FIXME #2307 is aggregated reachability check too strict, should we only look for reachability from this node, but in that case the ignore check in receiveGossip should also be changed
   def validNodeForGossip(node: UniqueAddress): Boolean =
     (node != selfUniqueAddress && latestGossip.hasMember(node) &&
       latestGossip.overview.reachability.isReachable(node))

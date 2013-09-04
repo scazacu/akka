@@ -207,14 +207,13 @@ private[cluster] class Reachability private (
   /**
    * Doesn't include terminated
    */
-  def allUnreachable: Set[UniqueAddress] = collect(Unreachable)
+  def allUnreachable: Set[UniqueAddress] = aggregatedStatus.collect {
+    case (subject, status) if status == Unreachable ⇒ subject
+  }(breakOut)
 
-  private def collect(status: ReachabilityStatus): Set[UniqueAddress] = {
-    val result: immutable.HashSet[UniqueAddress] = aggregatedStatus.collect {
-      case (subject, _status) if _status == status ⇒ subject
-    }(breakOut)
-    result
-  }
+  def allUnreachableOrTerminated: Set[UniqueAddress] = aggregatedStatus.collect {
+    case (subject, status) if status == Unreachable || status == Terminated ⇒ subject
+  }(breakOut)
 
   /**
    * Doesn't include terminated

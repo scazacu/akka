@@ -196,9 +196,8 @@ object ClusterEvent {
   private[cluster] def diffUnreachable(oldGossip: Gossip, newGossip: Gossip): immutable.Seq[UnreachableMember] =
     if (newGossip eq oldGossip) Nil
     else {
-      // FIXME #2307 what about Reachability.Terminated here?
-      val oldUnreachableNodes = oldGossip.overview.reachability.allUnreachable
-      (newGossip.overview.reachability.allUnreachable.collect {
+      val oldUnreachableNodes = oldGossip.overview.reachability.allUnreachableOrTerminated
+      (newGossip.overview.reachability.allUnreachableOrTerminated.collect {
         case node if !oldUnreachableNodes.contains(node) ⇒
           UnreachableMember(newGossip.member(node))
       })(collection.breakOut)
@@ -210,7 +209,6 @@ object ClusterEvent {
   private[cluster] def diffReachable(oldGossip: Gossip, newGossip: Gossip): immutable.Seq[ReachableMember] =
     if (newGossip eq oldGossip) Nil
     else {
-      // FIXME #2307 what about Reachability.Terminated here?
       (oldGossip.overview.reachability.allUnreachable.collect {
         case node if newGossip.hasMember(node) && newGossip.overview.reachability.isReachable(node) ⇒
           ReachableMember(newGossip.member(node))
@@ -321,7 +319,7 @@ private[cluster] final class ClusterDomainEventPublisher extends Actor with Acto
   def publishCurrentClusterState(receiver: Option[ActorRef]): Unit = {
     val state = CurrentClusterState(
       members = latestGossip.members,
-      unreachable = latestGossip.overview.reachability.allUnreachable map latestGossip.member, // FIXME #2307 should this contain terminated?
+      unreachable = latestGossip.overview.reachability.allUnreachableOrTerminated map latestGossip.member,
       seenBy = latestGossip.seenBy.map(_.address),
       leader = latestGossip.leader.map(_.address),
       roleLeaderMap = latestGossip.allRoles.map(r ⇒ r -> latestGossip.roleLeader(r).map(_.address))(collection.breakOut))

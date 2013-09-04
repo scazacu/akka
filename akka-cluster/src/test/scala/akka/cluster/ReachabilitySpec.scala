@@ -33,11 +33,12 @@ class ReachabilitySpec extends WordSpec with MustMatchers {
       r.allUnreachable must be(Set(nodeA))
     }
 
-    "be not be reachable when terminated" in {
+    "not be reachable when terminated" in {
       val r = Reachability.empty.terminated(nodeB, nodeA)
       r.isReachable(nodeA) must be(false)
       // allUnreachable doesn't include terminated
       r.allUnreachable must be(Set.empty)
+      r.allUnreachableOrTerminated must be(Set(nodeA))
     }
 
     "not change terminated entry" in {

@@ -12,6 +12,14 @@ import akka.testkit._
 import akka.testkit.TestEvent._
 import scala.concurrent.forkjoin.ThreadLocalRandom
 import akka.remote.testconductor.RoleName
+import akka.actor.Props
+import akka.actor.Actor
+import scala.util.control.NoStackTrace
+import akka.remote.QuarantinedEvent
+import akka.actor.ExtendedActorSystem
+import akka.remote.RemoteActorRefProvider
+import akka.actor.ActorRef
+import akka.dispatch.sysmsg.Failed
 
 object SurviveNetworkInstabilityMultiJvmSpec extends MultiNodeConfig {
   val first = role("first")
@@ -23,10 +31,32 @@ object SurviveNetworkInstabilityMultiJvmSpec extends MultiNodeConfig {
   val seventh = role("seventh")
   val eighth = role("eighth")
 
-  commonConfig(debugConfig(on = false).
+  commonConfig(debugConfig(on = false).withFallback(
+    ConfigFactory.parseString("akka.remote.system-message-buffer-size=20")).
     withFallback(MultiNodeClusterSpec.clusterConfig))
 
   testTransport(on = true)
+
+  deployOn(second, """"/parent/*" {
+      remote = "@third@"
+    }""")
+
+  class Parent extends Actor {
+    def receive = {
+      case p: Props ⇒ sender ! context.actorOf(p)
+    }
+  }
+
+  class RemoteChild extends Actor {
+    import context.dispatcher
+    context.system.scheduler.scheduleOnce(500.millis, self, "boom")
+    def receive = {
+      case "boom" ⇒ throw new SimulatedException
+      case x      ⇒ sender ! x
+    }
+  }
+
+  class SimulatedException extends RuntimeException("Simulated") with NoStackTrace
 }
 
 class SurviveNetworkInstabilityMultiJvmNode1 extends SurviveNetworkInstabilitySpec
@@ -40,7 +70,8 @@ class SurviveNetworkInstabilityMultiJvmNode8 extends SurviveNetworkInstabilitySp
 
 abstract class SurviveNetworkInstabilitySpec
   extends MultiNodeSpec(SurviveNetworkInstabilityMultiJvmSpec)
-  with MultiNodeClusterSpec {
+  with MultiNodeClusterSpec
+  with ImplicitSender {
 
   import SurviveNetworkInstabilityMultiJvmSpec._
 
@@ -186,6 +217,53 @@ abstract class SurviveNetworkInstabilitySpec
       awaitAllReachable()
       awaitMembersUp(roles.size)
       enterBarrier("after-5")
+    }
+
+    "down and remove quarantined node" taggedAs LongRunningTest in within(45.seconds) {
+      val others = Vector(first, third, fourth, fifth, sixth, seventh, eighth)
+
+      runOn(second) {
+        val sysMsgBufferSize = system.asInstanceOf[ExtendedActorSystem].provider.asInstanceOf[RemoteActorRefProvider].
+          remoteSettings.SysMsgBufferSize
+        val parent = system.actorOf(Props[Parent], "parent")
+        // fill up the system message redeliver buffer with many failing actors
+        for (_ ← 1 to sysMsgBufferSize + 1) {
+          // remote deployment to third
+          parent ! Props[RemoteChild]
+          val child = expectMsgType[ActorRef]
+          child ! "hello"
+          expectMsg("hello")
+          lastSender.path.address must be(address(third))
+        }
+      }
+      runOn(third) {
+        // after quarantined it will drop the Failed messages to deadLetters
+        muteDeadLetters(classOf[Failed])(system)
+      }
+      enterBarrier("children-deployed")
+
+      runOn(first) {
+        for (role ← others)
+          testConductor.blackhole(role, second, Direction.Both).await
+      }
+      enterBarrier("blackhole-6")
+
+      runOn(third) {
+        val p = TestProbe()
+        // undelivered system messages in RemoteChild on third should trigger QuarantinedEvent
+        system.eventStream.subscribe(p.ref, classOf[QuarantinedEvent])
+        within(10.seconds) {
+          p.expectMsgType[QuarantinedEvent].address must be(address(second))
+        }
+      }
+      enterBarrier("quarantined")
+
+      runOn(others: _*) {
+        // second should be removed because of quarantine
+        awaitAssert(clusterView.members.map(_.address) must not contain (address(second)))
+      }
+
+      enterBarrier("after-6")
     }
 
   }
